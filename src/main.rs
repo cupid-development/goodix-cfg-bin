@@ -1,6 +1,8 @@
 #![allow(arithmetic_overflow)]
 use serde::Serialize;
+use serde_with::serde_as;
 use std::{
+    collections::HashMap,
     env, fs,
     mem::{size_of, transmute, MaybeUninit},
     ptr::copy_nonoverlapping,
@@ -21,6 +23,8 @@ const TS_CFG_BLOCK_VID_LEN: usize = 8;
 const TS_CFG_BLOCK_FW_MASK_LEN: usize = 9;
 const TS_CFG_BLOCK_FW_PATCH_LEN: usize = 4;
 const TS_CFG_BLOCK_RESERVED_LEN: usize = 9;
+
+const GOODIX_CFG_MAX_SIZE: usize = 4096;
 
 #[derive(Debug, Copy, Clone, Serialize)]
 #[repr(C, packed(1))]
@@ -80,7 +84,8 @@ struct GoodixCfgBinHead {
 struct GoodixCfgPackage {
     cnst_info: GoodixCfgPkgConstInfo,
     reg_info: GoodixCfgPkgRegInfo,
-    cfg: u8,
+    #[serde(skip)]
+    cfg: *const u8,
     pkg_len: u32,
 }
 
@@ -89,6 +94,16 @@ struct GoodixCfgPackage {
 struct GoodixCfgBin {
     head: GoodixCfgBinHead,
     cfg_pkgs: Vec<GoodixCfgPackage>,
+    ic_configs: HashMap<u8, GoodixIcConfig>,
+}
+
+#[serde_as]
+#[derive(Debug, Serialize)]
+#[repr(C)]
+struct GoodixIcConfig {
+    len: i32,
+    #[serde_as(as = "[_; 4096]")]
+    data: [u8; GOODIX_CFG_MAX_SIZE],
 }
 
 #[derive(Debug)]
@@ -169,8 +184,21 @@ impl GoodixCfgBin {
                     transmute(&mut cfg_pkg.reg_info),
                     TS_PKG_REG_INFO_LEN,
                 );
-                cfg_pkg.cfg = input[offset1 as usize + TS_PKG_HEAD_LEN];
+                cfg_pkg.cfg = &input[offset1 as usize + TS_PKG_HEAD_LEN];
             }
+
+            // Get the ic config for this sensor ID
+            let cfg_len = cfg_pkg.pkg_len as usize - TS_PKG_CONST_INFO_LEN - TS_PKG_REG_INFO_LEN;
+            let mut ic_config_data = [0; GOODIX_CFG_MAX_SIZE];
+            unsafe { copy_nonoverlapping(cfg_pkg.cfg, ic_config_data.as_mut_ptr(), cfg_len) }
+
+            let ic_config = GoodixIcConfig {
+                len: cfg_len as i32,
+                data: ic_config_data,
+            };
+
+            this.ic_configs
+                .insert(cfg_pkg.cnst_info.cfg_type, ic_config);
 
             this.cfg_pkgs.push(cfg_pkg);
         }
